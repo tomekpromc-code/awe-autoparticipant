@@ -792,14 +792,6 @@ async function submitToAgentBeat(creds) {
 
 // ── Math Solver (for Moltbook verification) ─────────
 function solveChallenge(challengeText) {
-  // Step 1: Strip junk chars, collapse spaces, lowercase
-  const raw = challengeText
-    .replace(/[^a-zA-Z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .toLowerCase()
-    .trim();
-
-  // Step 2: Map word-numbers → digits (longer words first to avoid partial matches)
   const wordMap = [
     ["twenty",   20], ["thirty",  30], ["forty",   40], ["fifty",  50],
     ["sixty",    60], ["seventy", 70], ["eighty",  80], ["ninety", 90],
@@ -810,33 +802,83 @@ function solveChallenge(challengeText) {
     ["zero", 0], ["one", 1], ["two", 2], ["three", 3], ["four", 4],
     ["five", 5], ["six", 6], ["seven", 7], ["eight", 8], ["nine", 9],
   ];
-  let normalized = raw;
-  for (const [word, val] of wordMap) {
-    normalized = normalized.replace(new RegExp(`\\b${word}\\b`, "g"), ` ${val} `);
+
+  // Step 1: Clean
+  const raw = challengeText
+    .replace(/[^a-zA-Z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .trim();
+
+  // Step 2: Heal space-split number words ("twen ty" → "twenty", "thir ty" → "thirty")
+  // Try joining 2-4 adjacent tokens to see if they form a known number word
+  const tokens = raw.split(/\s+/);
+  const healed = [];
+  let i = 0;
+  while (i < tokens.length) {
+    let merged = false;
+    for (const [word] of wordMap) {
+      for (let len = 2; len <= Math.min(4, tokens.length - i); len++) {
+        if (tokens.slice(i, i + len).join("") === word) {
+          healed.push(word);
+          i += len;
+          merged = true;
+          break;
+        }
+      }
+      if (merged) break;
+    }
+    if (!merged) { healed.push(tokens[i]); i++; }
   }
-  normalized = normalized.replace(/\s+/g, " ").trim();
+  const healedRaw = healed.join(" ");
 
-  // Step 3: Collapse compound numbers ("20 5" → "25", "3 100" → "300")
-  for (let pass = 0; pass < 3; pass++) {
-    normalized = normalized.replace(/(\d+)\s+(\d+)/g, (_, a, b) => {
-      const na = parseInt(a), nb = parseInt(b);
-      if (na >= 20 && na <= 90 && na % 10 === 0 && nb >= 1 && nb <= 9) return String(na + nb);
-      if (nb === 100)  return String(na * 100);
-      if (nb === 1000) return String(na * 1000);
-      if (na >= 100 && nb < na) return String(na + nb);
-      return `${a} ${b}`;
-    });
+  function applyWordMap(text, boundaryMode) {
+    let s = text;
+    for (const [word, val] of wordMap) {
+      const pattern = boundaryMode
+        ? new RegExp(`\\b${word}\\b`, "g")
+        : new RegExp(word, "g");
+      s = s.replace(pattern, ` ${val} `);
+    }
+    return s.replace(/\s+/g, " ").trim();
   }
 
-  // Step 4: Extract all numbers
-  const allNums = [...normalized.matchAll(/\d+(\.\d+)?/g)].map(m => Number(m[0]));
+  function collapseCompounds(s) {
+    for (let pass = 0; pass < 3; pass++) {
+      s = s.replace(/(\d+)\s+(\d+)/g, (_, a, b) => {
+        const na = parseInt(a), nb = parseInt(b);
+        if (na >= 20 && na <= 90 && na % 10 === 0 && nb >= 1 && nb <= 9) return String(na + nb);
+        if (nb === 100)  return String(na * 100);
+        if (nb === 1000) return String(na * 1000);
+        if (na >= 100 && nb < na) return String(na + nb);
+        return `${a} ${b}`;
+      });
+    }
+    return s;
+  }
 
-  // Step 5: Detect operation from cleaned text
+  function extractNums(s) {
+    return [...s.matchAll(/\d+(\.\d+)?/g)].map(m => Number(m[0]));
+  }
+
+  // Strategy A: word-boundary matching on healed text
+  const normA = collapseCompounds(applyWordMap(healedRaw, true));
+  const numsA = extractNums(normA);
+
+  // Strategy B: substring matching on space-collapsed text (catches garbled spacing)
+  const collapsed = raw.replace(/\s+/g, "");
+  const normB = collapseCompounds(applyWordMap(collapsed, false));
+  const numsB = extractNums(normB);
+
+  // Pick strategy that found more numbers
+  const allNums = numsA.length >= numsB.length ? numsA : numsB;
+  const confidence = allNums.length >= 2; // confident if we found at least 2 numbers
+
+  // Detect operation from original cleaned text
   const hasTimes  = /\btimes\b|\bmultipl|\bproduct\b|\*/.test(raw);
   const hasDivide = /\bdivid|\bsplit\b|\//.test(raw);
   const hasMinus  = /\bminus\b|\bsubtract\b|\bless\b|\-/.test(raw);
 
-  // Step 6: Calculate
   let answer = 0;
   if (allNums.length >= 2) {
     if (hasTimes)       answer = allNums.reduce((a, b) => a * b);
@@ -847,7 +889,7 @@ function solveChallenge(challengeText) {
     answer = allNums[0];
   }
 
-  return { answer: answer.toFixed(2), raw, allNums };
+  return { answer: answer.toFixed(2), raw, allNums, confidence };
 }
 
 async function sendVerify(apiKey, verificationCode, answer) {
@@ -910,27 +952,11 @@ async function postVoucherComment(creds) {
     const commentId = data.comment.id;
     const expiresAt = new Date(v.expires_at);
 
-    info(`Verification challenge (expires ${expiresAt.toLocaleTimeString()}):`);
-    console.log(`\n  ${C.bold}${v.challenge_text}${C.reset}\n`);
-
-    // Auto-solve attempt
-    const { answer: autoAnswer, raw, allNums } = solveChallenge(v.challenge_text);
-    info(`Auto-solve: numbers [${allNums.join(", ")}] → ${autoAnswer}`);
-
-    const autoResult = await sendVerify(creds.moltbook.api_key, v.verification_code, autoAnswer);
-
-    if (autoResult.success) {
-      ok("Auto-verification passed! Comment published.");
-      creds.moltbook.comment_posted = true;
-      creds.moltbook.comment_id = commentId;
-      saveCreds(creds);
-      return creds;
-    }
-
-    // Auto-solve failed — ask user to solve manually (up to 3 attempts per comment)
-    warn(`Auto-solve failed (tried ${autoAnswer}).`);
-    info(`Cleaned challenge: "${raw}"`);
-    warn("Please read the challenge above and enter the answer manually.");
+    // Show the full challenge prominently
+    console.log(`\n  ${C.bold}${C.yellow}VERIFICATION CHALLENGE:${C.reset}`);
+    console.log(`  ${C.bold}${v.challenge_text}${C.reset}`);
+    console.log(`  ${C.dim}(expires at ${expiresAt.toLocaleTimeString()})${C.reset}\n`);
+    warn("Solve the math problem above and enter the answer below.");
 
     let attemptsLeft = 3;
     let solved = false;
@@ -1034,6 +1060,7 @@ ${C.bold}${C.green}
 async function main() {
   const args = process.argv.slice(2);
   const freshMode = args.includes("--fresh") || args.includes("-f");
+  const retryComment = args.includes("--retry-comment") || args.includes("-r");
 
   console.log(`
 ${C.bold}${C.magenta}
@@ -1056,6 +1083,22 @@ ${C.bold}${C.magenta}
   }
 
   let creds = loadCreds();
+
+  if (retryComment) {
+    if (!creds.moltbook) {
+      err("No Moltbook credentials found. Run the full script first.");
+      process.exit(1);
+    }
+    if (creds.moltbook.comment_posted) {
+      info("Clearing comment_posted flag to allow retry...");
+      delete creds.moltbook.comment_posted;
+      delete creds.moltbook.comment_id;
+      saveCreds(creds);
+      ok("Done. Jumping to step 9 — posting a fresh comment...\n");
+    } else {
+      info("comment_posted was already false — proceeding to step 9...\n");
+    }
+  }
 
   if (!freshMode && Object.keys(creds).length > 0) {
     info(`Found existing progress in ${CREDS_FILE}`);
