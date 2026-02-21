@@ -921,31 +921,48 @@ async function postVoucherComment(creds) {
 
     if (verifyData.success) {
       ok("Verification solved! Comment published.");
+      creds.moltbook.comment_posted = true;
+      if (data.comment?.id) creds.moltbook.comment_id = data.comment.id;
+      saveCreds(creds);
     } else {
       warn(`Auto-verification failed (answer was ${answerStr}).`);
       info(`Full challenge: "${raw}"`);
-      const manualAnswer = await input("Enter the correct answer (number with 2 decimals, e.g. 30.00)");
-      const retryRes = await fetch(`${MOLTBOOK_API}/verify`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${creds.moltbook.api_key}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          verification_code: v.verification_code,
-          answer: manualAnswer,
-        }),
-      });
-      const retryData = await retryRes.json();
-      if (retryData.success) {
-        ok("Verification solved! Comment published.");
-      } else {
-        warn("Verification failed. Comment may still be pending.");
+      let verified = false;
+      while (!verified) {
+        const manualAnswer = await input("Enter the correct answer (number with 2 decimals, e.g. 30.00), or 'skip' to retry later");
+        if (manualAnswer.toLowerCase() === "skip") {
+          warn("Skipped. Re-run the script to retry posting.");
+          break;
+        }
+        const retryRes = await fetch(`${MOLTBOOK_API}/verify`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${creds.moltbook.api_key}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            verification_code: v.verification_code,
+            answer: manualAnswer,
+          }),
+        });
+        const retryData = await retryRes.json();
+        if (retryData.success) {
+          ok("Verification solved! Comment published.");
+          creds.moltbook.comment_posted = true;
+          if (data.comment?.id) creds.moltbook.comment_id = data.comment.id;
+          saveCreds(creds);
+          verified = true;
+        } else {
+          warn(`Wrong answer. Got: ${JSON.stringify(retryData)}`);
+        }
       }
     }
+    return creds;
   }
 
+  // No verification challenge — comment is published directly
   creds.moltbook.comment_posted = true;
+  if (data.comment?.id) creds.moltbook.comment_id = data.comment.id;
   saveCreds(creds);
   return creds;
 }
