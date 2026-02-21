@@ -916,22 +916,36 @@ async function postVoucherComment(creds) {
     info("Posting voucher claim comment...\n");
     console.log(`  ${C.dim}${comment.replace(/\n/g, "\n  ")}${C.reset}\n`);
 
-    const res = await fetch(`${MOLTBOOK_API}/posts/${MOLTBOOK_POST_ID}/comments`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${creds.moltbook.api_key}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ content: comment }),
-    });
+    let res, data;
+    // Retry up to 5 times on 5xx errors (transient server issues)
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      res = await fetch(`${MOLTBOOK_API}/posts/${MOLTBOOK_POST_ID}/comments`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${creds.moltbook.api_key}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ content: comment }),
+      });
+      data = await res.json();
 
-    const data = await res.json();
+      if (res.status < 500) break; // not a server error, stop retrying
+
+      warn(`Server error (${res.status}), attempt ${attempt}/5. Waiting 10s...`);
+      if (attempt < 5) await sleep(10000);
+    }
 
     if (!res.ok) {
       if (data.statusCode === 403) {
         err("Agent not claimed yet. Go back and complete the claim flow.");
         err(`Claim URL: ${creds.moltbook.claim_url}`);
         throw new Error("Moltbook agent not claimed");
+      }
+      if (res.status >= 500) {
+        err("Moltbook server is having issues (500). This can happen if you already");
+        err("have a pending comment. Wait a few minutes, then re-run with:");
+        err("  node agentbeat-submit.mjs --retry-comment");
+        throw new Error("Moltbook server error — try again later");
       }
       err(`Comment failed: ${JSON.stringify(data)}`);
       throw new Error("Moltbook comment failed");
