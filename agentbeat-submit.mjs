@@ -927,7 +927,10 @@ async function postVoucherComment(creds) {
         },
         body: JSON.stringify({ content: comment }),
       });
-      data = await res.json();
+
+      // Safe JSON parse (server may return HTML on errors)
+      const text = await res.text();
+      try { data = JSON.parse(text); } catch { data = { statusCode: res.status, message: text.slice(0, 200) }; }
 
       if (res.status < 500) break; // not a server error, stop retrying
 
