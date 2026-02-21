@@ -790,6 +790,75 @@ async function submitToAgentBeat(creds) {
   return creds;
 }
 
+// ── Math Solver (for Moltbook verification) ─────────
+function solveChallenge(challengeText) {
+  // Step 1: Strip junk chars, collapse spaces, lowercase
+  const raw = challengeText
+    .replace(/[^a-zA-Z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .trim();
+
+  // Step 2: Map word-numbers → digits (longer words first to avoid partial matches)
+  const wordMap = [
+    ["twenty",   20], ["thirty",  30], ["forty",   40], ["fifty",  50],
+    ["sixty",    60], ["seventy", 70], ["eighty",  80], ["ninety", 90],
+    ["hundred", 100], ["thousand", 1000],
+    ["thirteen", 13], ["fourteen", 14], ["fifteen", 15], ["sixteen",   16],
+    ["seventeen",17], ["eighteen", 18], ["nineteen", 19],
+    ["eleven",   11], ["twelve",   12], ["ten",      10],
+    ["zero", 0], ["one", 1], ["two", 2], ["three", 3], ["four", 4],
+    ["five", 5], ["six", 6], ["seven", 7], ["eight", 8], ["nine", 9],
+  ];
+  let normalized = raw;
+  for (const [word, val] of wordMap) {
+    normalized = normalized.replace(new RegExp(`\\b${word}\\b`, "g"), ` ${val} `);
+  }
+  normalized = normalized.replace(/\s+/g, " ").trim();
+
+  // Step 3: Collapse compound numbers ("20 5" → "25", "3 100" → "300")
+  for (let pass = 0; pass < 3; pass++) {
+    normalized = normalized.replace(/(\d+)\s+(\d+)/g, (_, a, b) => {
+      const na = parseInt(a), nb = parseInt(b);
+      if (na >= 20 && na <= 90 && na % 10 === 0 && nb >= 1 && nb <= 9) return String(na + nb);
+      if (nb === 100)  return String(na * 100);
+      if (nb === 1000) return String(na * 1000);
+      if (na >= 100 && nb < na) return String(na + nb);
+      return `${a} ${b}`;
+    });
+  }
+
+  // Step 4: Extract all numbers
+  const allNums = [...normalized.matchAll(/\d+(\.\d+)?/g)].map(m => Number(m[0]));
+
+  // Step 5: Detect operation from cleaned text
+  const hasTimes  = /\btimes\b|\bmultipl|\bproduct\b|\*/.test(raw);
+  const hasDivide = /\bdivid|\bsplit\b|\//.test(raw);
+  const hasMinus  = /\bminus\b|\bsubtract\b|\bless\b|\-/.test(raw);
+
+  // Step 6: Calculate
+  let answer = 0;
+  if (allNums.length >= 2) {
+    if (hasTimes)       answer = allNums.reduce((a, b) => a * b);
+    else if (hasDivide) answer = allNums[0] / allNums[1];
+    else if (hasMinus)  answer = allNums[0] - allNums.slice(1).reduce((a, b) => a + b, 0);
+    else                answer = allNums.reduce((a, b) => a + b, 0);
+  } else if (allNums.length === 1) {
+    answer = allNums[0];
+  }
+
+  return { answer: answer.toFixed(2), raw, allNums };
+}
+
+async function sendVerify(apiKey, verificationCode, answer) {
+  const res = await fetch(`${MOLTBOOK_API}/verify`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ verification_code: verificationCode, answer }),
+  });
+  return res.json();
+}
+
 // ── Step 9: Post Voucher Comment on Moltbook ────────
 async function postVoucherComment(creds) {
   header(9, 9, "Post Voucher Claim on Moltbook");
@@ -799,172 +868,108 @@ async function postVoucherComment(creds) {
     return creds;
   }
 
-  const comment = generateClaimComment(creds);
+  // Outer loop — re-posts a fresh comment if verification keeps failing
+  while (true) {
+    const comment = generateClaimComment(creds);
+    info("Posting voucher claim comment...\n");
+    console.log(`  ${C.dim}${comment.replace(/\n/g, "\n  ")}${C.reset}\n`);
 
-  info("Posting voucher claim comment...\n");
-  console.log(`  ${C.dim}${comment.replace(/\n/g, "\n  ")}${C.reset}\n`);
-
-  const res = await fetch(`${MOLTBOOK_API}/posts/${MOLTBOOK_POST_ID}/comments`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${creds.moltbook.api_key}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ content: comment }),
-  });
-
-  const data = await res.json();
-
-  if (!res.ok) {
-    if (data.statusCode === 403) {
-      err("Agent not claimed yet. Go back and complete the claim flow.");
-      err(`Claim URL: ${creds.moltbook.claim_url}`);
-      throw new Error("Moltbook agent not claimed");
-    }
-    err(`Comment failed: ${JSON.stringify(data)}`);
-    throw new Error("Moltbook comment failed");
-  }
-
-  ok("Comment posted!");
-
-  // Solve verification challenge if present
-  if (data.comment?.verification?.verification_code) {
-    const v = data.comment.verification;
-    info("Solving verification challenge...");
-
-    // Step 1: Strip all non-letter/non-digit chars, collapse spaces, lowercase
-    const raw = v.challenge_text
-      .replace(/[^a-zA-Z0-9\s]/g, " ")  // remove punctuation/symbols
-      .replace(/\s+/g, " ")              // collapse whitespace
-      .toLowerCase()
-      .trim();
-
-    info(`Cleaned: "${raw.slice(0, 80)}..."`);
-
-    // Step 2: Map word-numbers to digits (order matters — longer words first)
-    const wordMap = [
-      ["twenty", 20], ["thirty", 30], ["forty", 40], ["fifty", 50],
-      ["sixty", 60], ["seventy", 70], ["eighty", 80], ["ninety", 90],
-      ["hundred", 100], ["thousand", 1000],
-      ["thirteen", 13], ["fourteen", 14], ["fifteen", 15], ["sixteen", 16],
-      ["seventeen", 17], ["eighteen", 18], ["nineteen", 19],
-      ["eleven", 11], ["twelve", 12], ["ten", 10],
-      ["zero", 0], ["one", 1], ["two", 2], ["three", 3], ["four", 4],
-      ["five", 5], ["six", 6], ["seven", 7], ["eight", 8], ["nine", 9],
-    ];
-
-    let normalized = raw;
-    for (const [word, val] of wordMap) {
-      normalized = normalized.replace(new RegExp(`\\b${word}\\b`, "g"), ` ${val} `);
-    }
-    normalized = normalized.replace(/\s+/g, " ").trim();
-
-    // Step 3: Collapse compound word-numbers: "20 5" -> "25", "3 100" -> "300"
-    for (let pass = 0; pass < 3; pass++) {
-      normalized = normalized.replace(/(\d+)\s+(\d+)/g, (_, a, b) => {
-        const na = parseInt(a), nb = parseInt(b);
-        // "twenty five" -> 20 + 5 = 25
-        if (na >= 20 && na <= 90 && na % 10 === 0 && nb >= 1 && nb <= 9) return String(na + nb);
-        // "three hundred" -> 3 * 100
-        if (nb === 100) return String(na * 100);
-        // "five thousand" -> 5 * 1000
-        if (nb === 1000) return String(na * 1000);
-        // "hundred fifty" -> 100 + 50
-        if (na >= 100 && nb < na) return String(na + nb);
-        return `${a} ${b}`;
-      });
-    }
-
-    // Step 4: Extract all numbers from the normalized text
-    const allNums = [...normalized.matchAll(/\d+(\.\d+)?/g)].map(m => Number(m[0]));
-
-    // Step 5: Detect operation keywords from cleaned text
-    const hasPlus = /\bplus\b|\badd\b|\bsum\b|\btotal\b|\band\b|\+/.test(raw);
-    const hasMinus = /\bminus\b|\bsubtract\b|\bless\b|\-/.test(raw);
-    const hasTimes = /\btimes\b|\bmultipl|\bproduct\b|\*/.test(raw);
-    const hasDivide = /\bdivid|\bsplit\b|\//.test(raw);
-
-    // Step 6: Calculate
-    let answer;
-    if (allNums.length >= 2) {
-      if (hasTimes) {
-        answer = allNums.reduce((a, b) => a * b);
-      } else if (hasDivide) {
-        answer = allNums[0] / allNums[1];
-      } else if (hasMinus) {
-        answer = allNums[0] - allNums.slice(1).reduce((a, b) => a + b, 0);
-      } else {
-        answer = allNums.reduce((a, b) => a + b, 0);
-      }
-    } else if (allNums.length === 1) {
-      answer = allNums[0];
-    } else {
-      answer = 0;
-    }
-
-    const answerStr = answer.toFixed(2);
-    info(`Numbers found: [${allNums.join(", ")}] -> ${answerStr}`);
-
-    const verifyRes = await fetch(`${MOLTBOOK_API}/verify`, {
+    const res = await fetch(`${MOLTBOOK_API}/posts/${MOLTBOOK_POST_ID}/comments`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${creds.moltbook.api_key}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        verification_code: v.verification_code,
-        answer: answerStr,
-      }),
+      body: JSON.stringify({ content: comment }),
     });
 
-    const verifyData = await verifyRes.json();
+    const data = await res.json();
 
-    if (verifyData.success) {
-      ok("Verification solved! Comment published.");
+    if (!res.ok) {
+      if (data.statusCode === 403) {
+        err("Agent not claimed yet. Go back and complete the claim flow.");
+        err(`Claim URL: ${creds.moltbook.claim_url}`);
+        throw new Error("Moltbook agent not claimed");
+      }
+      err(`Comment failed: ${JSON.stringify(data)}`);
+      throw new Error("Moltbook comment failed");
+    }
+
+    ok("Comment posted!");
+
+    // No verification challenge — published immediately
+    if (!data.comment?.verification?.verification_code) {
       creds.moltbook.comment_posted = true;
       if (data.comment?.id) creds.moltbook.comment_id = data.comment.id;
       saveCreds(creds);
-    } else {
-      warn(`Auto-verification failed (answer was ${answerStr}).`);
-      info(`Full challenge: "${raw}"`);
-      let verified = false;
-      while (!verified) {
-        const manualAnswer = await input("Enter the correct answer (number with 2 decimals, e.g. 30.00), or 'skip' to retry later");
-        if (manualAnswer.toLowerCase() === "skip") {
-          warn("Skipped. Re-run the script to retry posting.");
-          break;
-        }
-        const retryRes = await fetch(`${MOLTBOOK_API}/verify`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${creds.moltbook.api_key}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            verification_code: v.verification_code,
-            answer: manualAnswer,
-          }),
-        });
-        const retryData = await retryRes.json();
-        if (retryData.success) {
-          ok("Verification solved! Comment published.");
-          creds.moltbook.comment_posted = true;
-          if (data.comment?.id) creds.moltbook.comment_id = data.comment.id;
-          saveCreds(creds);
-          verified = true;
-        } else {
-          warn(`Wrong answer. Got: ${JSON.stringify(retryData)}`);
-        }
+      return creds;
+    }
+
+    // Has a verification challenge
+    const v = data.comment.verification;
+    const commentId = data.comment.id;
+    const expiresAt = new Date(v.expires_at);
+
+    info(`Verification challenge (expires ${expiresAt.toLocaleTimeString()}):`);
+    console.log(`\n  ${C.bold}${v.challenge_text}${C.reset}\n`);
+
+    // Auto-solve attempt
+    const { answer: autoAnswer, raw, allNums } = solveChallenge(v.challenge_text);
+    info(`Auto-solve: numbers [${allNums.join(", ")}] → ${autoAnswer}`);
+
+    const autoResult = await sendVerify(creds.moltbook.api_key, v.verification_code, autoAnswer);
+
+    if (autoResult.success) {
+      ok("Auto-verification passed! Comment published.");
+      creds.moltbook.comment_posted = true;
+      creds.moltbook.comment_id = commentId;
+      saveCreds(creds);
+      return creds;
+    }
+
+    // Auto-solve failed — ask user to solve manually (up to 3 attempts per comment)
+    warn(`Auto-solve failed (tried ${autoAnswer}).`);
+    info(`Cleaned challenge: "${raw}"`);
+    warn("Please read the challenge above and enter the answer manually.");
+
+    let attemptsLeft = 3;
+    let solved = false;
+
+    while (attemptsLeft > 0) {
+      const now = new Date();
+      if (now >= expiresAt) {
+        warn("Verification code expired. Posting a new comment to get a fresh challenge...");
+        break; // break inner loop → outer loop re-posts
+      }
+
+      const timeLeft = Math.round((expiresAt - now) / 1000);
+      const manualAnswer = await input(
+        `Enter the answer (${attemptsLeft} attempt${attemptsLeft > 1 ? "s" : ""} left, ${timeLeft}s before expiry) — format: 30.00`
+      );
+
+      const manualResult = await sendVerify(creds.moltbook.api_key, v.verification_code, manualAnswer);
+
+      if (manualResult.success) {
+        ok("Verification passed! Comment published.");
+        creds.moltbook.comment_posted = true;
+        creds.moltbook.comment_id = commentId;
+        saveCreds(creds);
+        solved = true;
+        break;
+      }
+
+      attemptsLeft--;
+      if (attemptsLeft > 0) {
+        warn(`Wrong answer. ${attemptsLeft} attempt${attemptsLeft > 1 ? "s" : ""} remaining.`);
+      } else {
+        warn("All attempts used. Posting a new comment to get a fresh challenge...");
       }
     }
-    return creds;
-  }
 
-  // No verification challenge — comment is published directly
-  creds.moltbook.comment_posted = true;
-  if (data.comment?.id) creds.moltbook.comment_id = data.comment.id;
-  saveCreds(creds);
-  return creds;
+    if (solved) return creds;
+    // If not solved, outer loop continues and posts a fresh comment
+    await sleep(1500); // small pause before re-posting
+  }
 }
 
 // ── Check Claim Status ──────────────────────────────
