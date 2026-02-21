@@ -1,0 +1,23 @@
+{
+  "name": "hui123",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "dependencies": {
+    "@x402/axios": "^2.4.0",
+    "@x402/core": "^2.4.0",
+    "@x402/evm": "^2.4.0",
+    "abitype": "^1.2.3",
+    "eventemitter3": "^5.0.1",
+    "isows": "^1.0.7",
+    "ox": "^0.12.4",
+    "viem": "^2.46.2",
+    "ws": "^8.18.3"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
